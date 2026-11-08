@@ -10,7 +10,7 @@ MODE=${1:-help}
 ARG=${2:-}
 # The published standalone repository pins CORE_URL to an immutable commit.
 CORE_SHA256='733aa259f208836fc0091649dceef126792e228d6cd6f32b3003358ddfa384ed'
-CORE_URL='https://raw.githubusercontent.com/hytuytujyt/tcpquality-gd-compare//runTcpQuality-core.sh'
+CORE_URL='https://raw.githubusercontent.com/hytuytujyt/tcpquality-gd-compare/12b1b56727fc7ad8f89070f94c60087b7c25793a/runTcpQuality-core.sh'
 NEXTTRACE_VERSION='1.7.6'
 NEXTTRACE_BASE_URL="https://github.com/nxtrace/NTrace-core/releases/download/v$NEXTTRACE_VERSION"
 TCPFIT_VERSION='0.5.9'
