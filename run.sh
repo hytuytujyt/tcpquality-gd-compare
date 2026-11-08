@@ -488,11 +488,16 @@ rtt_probe() {
   printf '往返延迟（ms）：最小 %s / 中位 %s / 平均 %s / 最大 %s\n' "$min" "$med" "$avg" "$max"
   printf '建议 tune 的 RTT：%s ms（取中位数向上取整；晚高峰多测几次再定）\n' "$rec"
   csv_file="$DATA_DIR/rtt.csv"
+  header='time_utc,target,sent,received,min_ms,median_ms,avg_ms,max_ms'
+  # 表头与旧版不同时，把旧文件改名保留，避免列错位
+  if [[ -e "$csv_file" && "$(head -n 1 -- "$csv_file")" != "$header" ]]; then
+    mv -f -- "$csv_file" "$csv_file.old-$(date -u '+%Y%m%dT%H%M%SZ')"
+  fi
   if [[ ! -e "$csv_file" ]]; then
-    printf 'time_utc,ip,port,sent,received,min_ms,median_ms,avg_ms,max_ms\n' > "$csv_file"
+    printf '%s\n' "$header" > "$csv_file"
     chmod 600 "$csv_file"
   fi
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$ip" "$port" "$count" "$n" "$min" "$med" "$avg" "$max" >> "$csv_file"
+  printf '%s,%s:%s,%s,%s,%s,%s,%s,%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$ip" "$port" "$count" "$n" "$min" "$med" "$avg" "$max" >> "$csv_file"
   printf '已追加到 %s\n' "$csv_file"
 }
 
