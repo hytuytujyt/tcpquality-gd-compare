@@ -18,6 +18,7 @@ TCPFIT_SHA256='8331cc40950229a3280ce32406330a85b1a3d21ba398a4db3dc7e25c39783741'
 TCPFIT_URL="https://raw.githubusercontent.com/Kylin010/tcpfit/v$TCPFIT_VERSION/tcpfit.sh"
 TUNE_RTT=${3:-}
 CORE_PID=''
+CORE_STARTED=0
 RUN_CSV_TMP=''
 
 
@@ -29,7 +30,7 @@ usage() {
   $0 baseline [MiB] 自动准备依赖并设置两轮测试总预算，然后做调优前测试
                     默认 128 MiB（基线+调优后合计）；可设 32-2048 的4倍数
   $0 tune <Mbps> [RTT-ms] 只做 tcpfit 基础调优，例如：$0 tune 200 35
-                            RTT 默认 150 ms（固定假设值，不自动测量）
+                            RTT 省略时取基线中广东电信/移动普通回程较大延迟，无有效数据则回退 150 ms
   $0 after          调优后测试（要求已有 baseline 和 tune 记录）
   $0 compare        对比已保存的两轮报告
   $0 setup          只安装/检查依赖、NextTrace Tiny、TcpQuality core 和 tcpfit，不执行测速
@@ -53,8 +54,24 @@ stop_core() {
   CORE_PID=''
 }
 
+sweep_tcpq_chains() {
+  local tool hook chain
+  for tool in iptables ip6tables; do
+    command -v "$tool" >/dev/null 2>&1 || continue
+    while read -r chain; do
+      [[ "$chain" =~ ^TCPQ_TOS_[A-Za-z0-9_]+$ ]] || continue
+      for hook in INPUT OUTPUT; do
+        while "$tool" -w 5 -D "$hook" -j "$chain" >/dev/null 2>&1; do :; done
+      done
+      "$tool" -w 5 -F "$chain" >/dev/null 2>&1 || true
+      "$tool" -w 5 -X "$chain" >/dev/null 2>&1 || true
+    done < <("$tool" -w 5 -S 2>/dev/null | awk '$1=="-N" && $2 ~ /^TCPQ_TOS_/ {print $2}')
+  done
+}
+
 cleanup_wrapper() {
   stop_core
+  [[ "${CORE_STARTED:-0}" != 1 ]] || sweep_tcpq_chains
   [[ -z "${RUN_CSV_TMP:-}" ]] || rm -f -- "$RUN_CSV_TMP"
 }
 
@@ -88,8 +105,13 @@ validate_data_dir() {
   done
   local IFS=/
   canonical="/${normalized[*]}"
-  home_dir=${HOME%/}
+  home_dir=${HOME:-}
+  home_dir=${home_dir%/}
   if [[ "$canonical" != "$DEFAULT_DATA_DIR" ]]; then
+    case "$canonical" in
+      /etc|/etc/*|/usr|/usr/*|/boot|/boot/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/bin|/bin/*|/sbin|/sbin/*|/lib|/lib/*|/lib32|/lib32/*|/lib64|/lib64/*|/run|/run/*)
+        fail "拒绝使用系统目录：$canonical" ;;
+    esac
     [[ "$canonical" != / && "$canonical" != /root && "$canonical" != /home && "$canonical" != /tmp && "$canonical" != /usr && "$canonical" != /etc && "$canonical" != /var && "$canonical" != /opt && "$canonical" != "$home_dir" ]] || fail "拒绝使用危险数据目录：$canonical"
   fi
   current=''
@@ -122,13 +144,31 @@ choose_budget_mib() {
   printf '%s\n' "$value"
 }
 
+check_csv_header() {
+  local f="$1"
+  head -n 1 -- "$f" | LC_ALL=C sed '1s/^\xEF\xBB\xBF//' | awk -F, '{ ok = (NF>=12 && $4=="运营商" && $7=="状态" && $10=="丢包率(%)" && $11=="平均延迟ms" && $12=="线路"); exit !ok }'
+}
+
 compare_reports() {
   local before="$DATA_DIR/baseline.csv" after="$DATA_DIR/after.csv"
-  local budget t1 t2 per_run per_carrier
+  local budget t1 t2 per_run per_carrier f
+  for f in "$before" "$after"; do
+    check_csv_header "$f" || fail "CSV 表头与预期的 core 输出格式不符，拒绝对比以免列错位：$f"
+  done
   budget=$(cat "$DATA_DIR/comparison-budget-mib" 2>/dev/null || echo '未记录')
   if [[ "$budget" =~ ^[0-9]+$ ]]; then per_run=$((budget / 2)); per_carrier=$((budget / 4)); else per_run='未记录'; per_carrier='未记录'; fi
   t1=$(cat "$DATA_DIR/baseline.time" 2>/dev/null || echo '未知')
   t2=$(cat "$DATA_DIR/after.time" 2>/dev/null || echo '未知')
+  local e1 e2 gap
+  e1=$(date -u -d "$t1" +%s 2>/dev/null || echo '')
+  e2=$(date -u -d "$t2" +%s 2>/dev/null || echo '')
+  if [[ "$e1" =~ ^[0-9]+$ && "$e2" =~ ^[0-9]+$ ]]; then
+    gap=$((e2 - e1))
+    (( gap < 0 )) && gap=$((-gap))
+    if (( gap > 21600 )); then
+      printf '[!] 两次测试相隔约 %s 小时，时段与链路负载可能不同，对比结论请谨慎参考。\n' "$((gap / 3600))" >&2
+    fi
+  fi
   printf '╭──────── TcpQuality 调优前后对比（广东 IPv4）────────╮\n'
   printf '  两轮下载总预算：%s MiB（每轮最多 %s MiB；每运营商每轮最多 %s MiB）\n  基线：%s\n  调优后：%s\n' "$budget" "$per_run" "$per_carrier" "$t1" "$t2"
   awk -F, -v f1="$before" -v f2="$after" '
@@ -226,6 +266,10 @@ missing_tools() {
   done
 }
 
+warn_optional_tools() {
+  command -v iptables >/dev/null 2>&1 || printf '[!] 未找到 iptables：单线程测速的目标连接流量计数将降级，结果仍可用，但流量统计可能不准确。\n' >&2
+}
+
 confirm_setup() {
   local missing="$1" need_tcpfit="$2" need_core="$3" need_nexttrace="$4" answer
   printf '\n首次准备需要网络下载/安装：\n'
@@ -263,7 +307,7 @@ nexttrace_asset() {
     x86_64|amd64) printf '%s|%s\n' nexttrace-tiny_linux_amd64 9f219ba91318a3e1534bd28c661ef8019da42825ed48257035c508962d007271 ;;
     i386|i486|i586|i686) printf '%s|%s\n' nexttrace-tiny_linux_386 5137792b18dc5830834b0e537aea2018f0d8d17c7588c8f7bde691f6bbb03c65 ;;
     aarch64|arm64) printf '%s|%s\n' nexttrace-tiny_linux_arm64 aeab456e2f8aebd62cd1dd2d6458d2ec57b38f5d707e196bab41f999ff898810 ;;
-    armv7l|armv7) printf '%s|%s\n' nexttrace-tiny_linux_armv7 deef6df56fcaefd14737859ad545d941cb1bffbf6b02702aba1b9aefad317614 ;;
+    armv7l|armv7|armv8l) printf '%s|%s\n' nexttrace-tiny_linux_armv7 deef6df56fcaefd14737859ad545d941cb1bffbf6b02702aba1b9aefad317614 ;;
     armv6l|armv6) printf '%s|%s\n' nexttrace-tiny_linux_armv6 5cdb0fa7b4c0e983342b1867f4e3504cb42ee77b3b4be7eee88ee225f79741e1 ;;
     armv5tel|armv5) printf '%s|%s\n' nexttrace-tiny_linux_armv5 4836257e81051bda91b0545144e34f219c83e2dcded55b8cbacfd768d722beeb ;;
     loongarch64|loong64) printf '%s|%s\n' nexttrace-tiny_linux_loong64 8e55ed498e4d201a1219bf7e2e88c8585ef1aad30f14834caf50ffcb340daf11 ;;
@@ -295,7 +339,8 @@ install_nexttrace_tiny() {
   if existing=$(type -P nexttrace-tiny 2>/dev/null); then
     [[ "$existing" == "$target" ]] || fail "nexttrace-tiny 已安装在 $existing 且校验不匹配；为避免执行未知二进制，请先移走或更新它。"
   fi
-  tmp=$(mktemp "${TMPDIR:-/tmp}/nexttrace-tiny.XXXXXX") || return 1
+  mkdir -p "$DATA_DIR" && chmod 700 "$DATA_DIR" || return 1
+  tmp=$(mktemp "$DATA_DIR/.nexttrace-tiny.XXXXXX") || return 1
   if ! curl -fsSL --retry 2 --connect-timeout 10 --max-time 90 \
     "$NEXTTRACE_BASE_URL/$asset" -o "$tmp"; then
     rm -f -- "$tmp"; return 1
@@ -311,9 +356,15 @@ install_nexttrace_tiny() {
 }
 
 install_tcpfit() {
-  local tmp
-  command -v tcpfit >/dev/null 2>&1 && return 0
-  tmp=$(mktemp "${TMPDIR:-/tmp}/tcpfit.XXXXXX") || return 1
+  local tmp existing
+  if existing=$(type -P tcpfit 2>/dev/null); then
+    if ! printf '%s  %s\n' "$TCPFIT_SHA256" "$existing" | sha256sum -c - >/dev/null 2>&1; then
+      printf '[!] 已存在的 tcpfit（%s）与固定的 v%s 校验和不一致，将继续使用它但未经校验；调优前请自行确认来源。\n' "$existing" "$TCPFIT_VERSION" >&2
+    fi
+    return 0
+  fi
+  mkdir -p "$DATA_DIR" && chmod 700 "$DATA_DIR" || return 1
+  tmp=$(mktemp "$DATA_DIR/.tcpfit.XXXXXX") || return 1
   if ! curl -fsSL --retry 2 --connect-timeout 10 --max-time 90 "$TCPFIT_URL" -o "$tmp"; then
     rm -f "$tmp"; return 1
   fi
@@ -382,6 +433,7 @@ prepare() {
   [[ -z "$still_missing" ]] || fail "仍缺少系统工具：${still_missing//$'\n'/, }"
   install_nexttrace_tiny || fail '安装或校验 NextTrace Tiny 失败；需要与固定版本匹配的可执行命令 nexttrace-tiny。'
   install_tcpfit || fail '安装 tcpfit 失败。'
+  warn_optional_tools
   if [[ -s "$DATA_DIR/runTcpQuality-core.sh" ]]; then CORE="$DATA_DIR/runTcpQuality-core.sh"; else install_core; fi
   verify_core
   export TCPQUALITY_NO_AUTO_INSTALL=1
@@ -438,10 +490,17 @@ if [[ "$MODE" == tune ]]; then
     (( 10#$TUNE_RTT >= 1 && 10#$TUNE_RTT <= 2000 )) || fail 'RTT 必须是 1-2000 之间的整数毫秒。'
 
     TUNE_RTT=$((10#$TUNE_RTT))
-  else
-    TUNE_RTT=150
   fi
   [[ -s "$DATA_DIR/baseline.csv" ]] || fail '请先执行 baseline 并保存调优前记录。'
+  if [[ -z "$TUNE_RTT" ]]; then
+    TUNE_RTT=$(awk -F, '$1=="三网" && $2=="IPv4" && $3=="广东" && ($4=="电信" || $4=="移动") && $7=="OK" && $11 ~ /^[0-9]+([.][0-9]+)?$/ { v=$11+0; if (v>m) m=v } END { if (m>0) { r=int(m); if (r<m) r++; if (r<1) r=1; if (r>2000) r=2000; print r } }' "$DATA_DIR/baseline.csv" 2>/dev/null || true)
+    if [[ "$TUNE_RTT" =~ ^[0-9]+$ ]]; then
+      printf '[*] 未指定 RTT，按基线中广东电信/移动普通回程较大延迟取 %s ms。\n' "$TUNE_RTT"
+    else
+      TUNE_RTT=150
+      printf '[*] 基线中无有效延迟数据，RTT 回退到默认 150 ms。\n'
+    fi
+  fi
   [[ ! -e "$DATA_DIR/tune.done" ]] || fail '基础调优已记录；拒绝重复执行。需要重做请先备份并重置比较记录。'
 elif [[ "$MODE" == baseline ]]; then
   [[ ! -e "$DATA_DIR/baseline.csv" ]] || fail "基线已存在：$DATA_DIR/baseline.csv；拒绝重复测速。"
@@ -511,6 +570,8 @@ printf '[%s] 开始广东电信/移动 IPv4 专项测试（%s）\n' "$stamp" "$M
 printf '基线+调优后两轮总预算：%s MiB；本轮最多 %s MiB，电信/移动各最多 %s MiB。\n' "$BUDGET_MIB" "$RUN_BUDGET_MIB" "$PER_CARRIER_MIB"
 printf '另有每次 10 秒超时；预算只限四个单线程下载对象，不含工具安装、协议开销及其他流量。\n'
 printf '默认网卡 RX+TX 计数包含其他并发流量。\n'
+sweep_tcpq_chains
+CORE_STARTED=1
 bash "$CORE" --gd-proxy-only --no-rank-upload >"$log" 2>&1 &
 CORE_PID=$!
 core_status=0
@@ -522,6 +583,9 @@ if (( core_status != 0 )); then
   exit "$core_status"
 fi
 [[ -s "$RUN_CSV_TMP" ]] || fail "测试结束但找不到本次运行的 CSV；查看 $log"
+if ! awk -F, '$1=="三网单线程速度" && $2=="广东" && ($3=="电信" || $3=="移动") && $7=="OK" && $10 ~ /^[0-9]+([.][0-9]+)?$/ {seen[$3]=1} END {exit !(seen["电信"] && seen["移动"])}' "$RUN_CSV_TMP"; then
+  fail "本次 CSV 缺少广东电信/移动的有效单线程下载结果，未保存为 $MODE.csv，可直接重试；查看 $log"
+fi
 mv -f -- "$RUN_CSV_TMP" "$csv"
 RUN_CSV_TMP=''
 after=$(traffic_bytes "$iface")
