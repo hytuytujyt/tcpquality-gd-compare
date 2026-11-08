@@ -26,10 +26,10 @@
 
 支持 Debian/Ubuntu 和 Alpine 的系统依赖安装。包管理器下载会消耗额外流量，**不包含在测速载荷上限内**；脚本会在安装前显示计划并要求确认。测速时通过 wrapper 禁止 core 静默安装依赖；若检查到缺失，会提示先运行 `setup` 准备依赖。
 
-从不可变提交下载入口脚本（该提交版本为 `cc6cfbfdfa38800de4d0aac711c2e811be13fc9b`）：
+从不可变提交下载入口脚本（该提交版本为 `528b3ca1ebc3e2f177a3a046d3267076cf3b1142`）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hytuytujyt/tcpquality-gd-compare/main/run.sh -o /root/tq-gd.sh
+curl -fsSL https://raw.githubusercontent.com/hytuytujyt/tcpquality-gd-compare/528b3ca1ebc3e2f177a3a046d3267076cf3b1142/run.sh -o /root/tq-gd.sh
 chmod 700 /root/tq-gd.sh
 ```
 
