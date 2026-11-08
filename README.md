@@ -27,14 +27,15 @@
    chmod 700 /root/tq-gd.sh
    sha256sum /root/tq-gd.sh   # 与维护者在可信渠道公布的值比对，不一致不要运行
    ```
-2. `setup`（可选，提前安装依赖）。
-3. `rtt <IP>`（可选，建议在不同时段多测几次，记下中位数）。
+2. `setup`：安装依赖（nping、NextTrace、tcpfit、core）。全新 VPS 上运行 `rtt` 前必须先执行一次。
+3. `rtt <IP>`（可选，可反复运行，建议在不同时段多测，记下中位数）。
 4. `baseline [MiB]`：调优前测试。首次运行会提示安装依赖。
 5. `tune <Mbps> [RTT]`：基础调优。
 6. `after`：调优后测试。
 7. `compare`：查看前后对比。
 
 ```sh
+/root/tq-gd.sh setup
 /root/tq-gd.sh rtt 你的公网IP
 /root/tq-gd.sh baseline 512
 /root/tq-gd.sh tune 200 60
@@ -59,6 +60,8 @@
 
 **RTT**
 - `rtt` 使用 TCP SYN 而不是 ICMP。如果目标端口丢弃 SYN，会显示全部丢包，换一个端口即可。
+- `rtt.csv` 每次追加一行，列为：`time_utc,target,sent,received,min_ms,median_ms,avg_ms,max_ms`，其中 `target` 为 `IP:端口`。如果发现旧版表头的文件，会自动改名为 `rtt.csv.old-时间戳` 再新建。
+- 定时收集示例（每 30 分钟一次）：`*/30 * * * * /root/tq-gd.sh rtt 你的IP >/dev/null 2>&1`，需先完成 `setup`。
 - 延迟受时段影响，建议在晚高峰测量。
 
 **tune**
