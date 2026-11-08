@@ -33,6 +33,8 @@ usage() {
                             RTT 省略时取基线中广东电信/移动普通回程较大延迟，无有效数据则回退 150 ms
   $0 after          调优后测试（要求已有 baseline 和 tune 记录）
   $0 compare        对比已保存的两轮报告
+  $0 rtt <IP> [次数] 只测 VPS→该 IPv4 的 TCP SYN 往返延迟与丢包，不下载、不调优，可反复执行
+                    默认 30 次、端口 443；可用 TQ_RTT_COUNT、TQ_RTT_PORT 修改；结果追加到 rtt.csv
   $0 setup          只安装/检查依赖、NextTrace Tiny、TcpQuality core 和 tcpfit，不执行测速
   RESET=YES $0 reset 清除本比较记录（不回滚 tcpfit）
 
@@ -359,7 +361,11 @@ install_tcpfit() {
   local tmp existing
   if existing=$(type -P tcpfit 2>/dev/null); then
     if ! printf '%s  %s\n' "$TCPFIT_SHA256" "$existing" | sha256sum -c - >/dev/null 2>&1; then
-      printf '[!] 已存在的 tcpfit（%s）与固定的 v%s 校验和不一致，将继续使用它但未经校验；调优前请自行确认来源。\n' "$existing" "$TCPFIT_VERSION" >&2
+      if [[ "${FORCE_TCPFIT:-0}" == 1 ]]; then
+        printf '[!] 已存在的 tcpfit（%s）与固定的 v%s 校验和不一致；已按 FORCE_TCPFIT=1 强制继续，请自行确认来源。\n' "$existing" "$TCPFIT_VERSION" >&2
+        return 0
+      fi
+      fail "已存在的 tcpfit（$existing）与固定的 v$TCPFIT_VERSION 校验和不一致，拒绝以 root 运行未知版本。请先确认来源或移走它；确认后可设 FORCE_TCPFIT=1 强制继续。"
     fi
     return 0
   fi
@@ -447,8 +453,57 @@ prepare() {
   printf '[OK] 系统依赖、NextTrace Tiny、tcpfit 和 TcpQuality core 已就绪。\n'
 }
 
+rtt_probe() {
+  local ip="$ARG" count="${TQ_RTT_COUNT:-30}" port="${TQ_RTT_PORT:-443}"
+  local i raw rtt n stats min med avg max rec lost_pct csv_file octet
+  local -a samples=()
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail "请提供对方的 IPv4 地址，例如：$0 rtt 1.2.3.4"
+  local IFS=.
+  for octet in $ip; do (( 10#$octet <= 255 )) || fail "IPv4 地址不合法：$ip"; done
+  unset IFS
+  [[ "$count" =~ ^[1-9][0-9]{0,2}$ ]] || fail 'TQ_RTT_COUNT 须为 1-999 的整数。'
+  [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && (( 10#$port <= 65535 )) || fail 'TQ_RTT_PORT 须为 1-65535 的整数。'
+  command -v nping >/dev/null 2>&1 || fail '缺少 nping，请先运行 setup 安装依赖。'
+  mkdir -p "$DATA_DIR" && chmod 700 "$DATA_DIR"
+  printf '[*] 向 %s:%s 发送 %s 次 TCP SYN 探测（不下载、不改系统参数）……\n' "$ip" "$port" "$count"
+  for ((i = 1; i <= count; i++)); do
+    raw=$(nping --tcp -p "$port" --flags syn -c 1 "$ip" 2>&1 || true)
+    # 用 here-string 而不是管道，避免 pipefail 下 awk 提前退出导致误判
+    rtt=$(awk '{ if (match($0, /Avg rtt: *[0-9.]+/)) { s = substr($0, RSTART, RLENGTH); sub(/Avg rtt: */, "", s); print s; exit } }' <<< "$raw")
+    if [[ "$rtt" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      samples+=("$rtt")
+    fi
+    sleep 0.2
+  done
+  n=${#samples[@]}
+  if (( n == 0 )); then
+    printf '[!] %s 次探测全部无回应（丢包 100%%）。请确认 %s 可达、端口 %s 会回包（防火墙可能丢弃 SYN）。\n' "$count" "$ip" "$port" >&2
+    exit 1
+  fi
+  stats=$(printf '%s\n' "${samples[@]}" | sort -n | awk '{ a[NR] = $1; s += $1 } END { m = (NR % 2) ? a[(NR + 1) / 2] : (a[NR / 2] + a[NR / 2 + 1]) / 2; printf "%.2f %.2f %.2f %.2f", a[1], m, s / NR, a[NR] }')
+  read -r min med avg max <<< "$stats"
+  rec=$(awk -v m="$med" 'BEGIN { r = int(m); if (r < m) r++; if (r < 1) r = 1; print r }')
+  lost_pct=$(awk -v a="$count" -v b="$n" 'BEGIN { printf "%.1f", (a - b) * 100 / a }')
+  printf '\n目标 %s:%s，发送 %s 次，收到 %s 次（丢包 %s%%）\n' "$ip" "$port" "$count" "$n" "$lost_pct"
+  printf '往返延迟（ms）：最小 %s / 中位 %s / 平均 %s / 最大 %s\n' "$min" "$med" "$avg" "$max"
+  printf '建议 tune 的 RTT：%s ms（取中位数向上取整；晚高峰多测几次再定）\n' "$rec"
+  csv_file="$DATA_DIR/rtt.csv"
+  if [[ ! -e "$csv_file" ]]; then
+    printf 'time_utc,ip,port,sent,received,min_ms,median_ms,avg_ms,max_ms\n' > "$csv_file"
+    chmod 600 "$csv_file"
+  fi
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$ip" "$port" "$count" "$n" "$min" "$med" "$avg" "$max" >> "$csv_file"
+  printf '已追加到 %s\n' "$csv_file"
+}
+
 case "$MODE" in
   help|-h|--help) usage; exit 0 ;;
+  rtt)
+    require_root
+    validate_data_dir
+    rtt_probe
+    exit 0
+    ;;
   reset)
     [[ "${RESET:-}" == YES ]] || fail "拒绝清除记录；如确认，运行 RESET=YES $0 reset。此操作不会回滚 tcpfit。"
     validate_data_dir
@@ -540,7 +595,15 @@ if [[ "$MODE" == tune ]]; then
   chmod 600 "$DATA_DIR/tune.traffic"
   if (( tune_rc != 0 )); then
     tail -n 60 "$DATA_DIR/tune.log" >&2 || true
-    fail 'tcpfit 基础调优失败；流量计数已保存，但未写入 tune.done。'
+    printf '[!] tcpfit 调优失败，尝试自动回滚已改动的内核参数……\n' >&2
+    if tcpfit rollback >"$DATA_DIR/tune-rollback.log" 2>&1; then
+      chmod 600 "$DATA_DIR/tune-rollback.log"
+      printf '[OK] 已回滚到调优前状态（日志：%s）。\n' "$DATA_DIR/tune-rollback.log" >&2
+    else
+      chmod 600 "$DATA_DIR/tune-rollback.log"
+      printf '[!] 自动回滚也失败，请手动检查系统参数并执行 tcpfit rollback（日志：%s）。\n' "$DATA_DIR/tune-rollback.log" >&2
+    fi
+    fail 'tcpfit 基础调优失败；流量计数已保存，但未写入 tune.done，可修正原因后重新执行 tune。'
   fi
   cat "$DATA_DIR/tune.log"
   printf 'bandwidth_mbps=%s\nrtt_ms=%s\n' "$ARG" "$TUNE_RTT" > "$DATA_DIR/tune.done"
