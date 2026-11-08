@@ -1,88 +1,80 @@
-# 广东电信/移动低流量 TcpQuality 前后对比
+# 广东电信/移动 TcpQuality 前后对比（低流量版）
 
-本目录包含一个基于 [ibsgss/TcpQuality](https://github.com/ibsgss/TcpQuality) 的专用版本，源代码对应上游提交 `6017af3fcb83b300b9a15b058d58062551d1c682`。保留上游许可证，见本目录 `LICENSE`；新增 `--gd-proxy-only` 专用模式，限制测试范围。
+基于 [ibsgss/TcpQuality](https://github.com/ibsgss/TcpQuality)（上游提交 `6017af3`，许可证见 `LICENSE`），新增 `--gd-proxy-only` 模式，只测广东电信/移动。配合 [tcpfit](https://github.com/Kylin010/tcpfit) v0.5.9 做一次性 TCP 基础调优，并对比调优前后的效果。
 
-独立仓库：[hytuytujyt/tcpquality-gd-compare](https://github.com/hytuytujyt/tcpquality-gd-compare)。
+- 测试范围：广东电信/移动 IPv4 普通回程、大包回程，以及 VPS → 广东单线程下载。
+- 不测：联通、IPv6、上传、其他地区、教育网、国际线路。不上传报告，不参与测速排名。
 
-## 测试范围
+## 功能一览
 
-- 广东电信、移动的 IPv4 普通回程。
-- 广东电信、移动的 IPv4 大包回程。
-- VPS → 广东的电信、移动单线程下载测速。
-- 单线程下载总预算按调优前、调优后两轮合计设置，可设 32–2048 MiB（4 的倍数），默认 128 MiB。预算平均分配给四次下载（两个运营商 × 两轮）；每次另有 10 秒超时，实际通常更少。
+| 命令 | 作用 | 流量 | 能否重复 |
+|---|---|---|---|
+| `setup` | 安装依赖、NextTrace、tcpfit、core，不测速 | 仅安装包 | 可以 |
+| `rtt <IP> [次数]` | 测 VPS → 指定 IP 的延迟和丢包 | 几十 KB 量级 | 可以，结果追加到 `rtt.csv` |
+| `baseline [MiB]` | 调优前测试（延迟、丢包、单线程下载） | 约等于预算 | 不可以，已有记录会拒绝 |
+| `tune <Mbps> [RTT]` | tcpfit 基础调优（修改系统参数，一次性） | 很少 | 不可以 |
+| `after` | 调优后测试 | 约等于预算 | 不可以 |
+| `compare` | 输出前后对比 | 无 | 可以 |
+| `reset` | 清除比较记录（需 `RESET=YES`），不回滚 tcpfit | 无 | — |
 
-不测联通、其他地区、IPv6、上传、教育网、国际互联、Apple CDN；不上传测试报告或参与测速排名。未能获取广东地区对应运营商测速节点时会报错，不回退到其他地区。
+## 使用顺序
 
-网卡 RX+TX 计数会记录在结果文件中，但包含 VPS 上其他并发流量，也不保证等于商家计费字节。
+每一步依赖前一步：`tune` 需要已有 `baseline`，`after` 需要 `baseline` 和 `tune`，`compare` 需要两次测试的结果。
 
-## 自动准备与操作流程
-
-以 root 在 Linux VPS 上运行。需要 Bash 与网络连接。首次执行 `baseline` 会：
-
-1. 检查并询问是否自动安装缺少的系统工具。
-2. 下载固定版本的 NextTrace Tiny 发行二进制，并在安装前校验对应架构的 SHA256；下载的 TcpQuality core 也会校验 SHA256，运行前无论 core 来自脚本目录还是数据目录都会再次校验。wrapper 会从不可变提交下载与发布版本匹配的 core。
-3. 如系统没有 tcpfit，下载官方 v0.5.9 脚本并校验 SHA256 后安装到 `/usr/local/bin/tcpfit`。
-4. 完成上述准备后才开始基线测试。
-
-支持 Debian/Ubuntu 和 Alpine 的系统依赖安装。包管理器下载会消耗额外流量，**不包含在测速载荷上限内**；脚本会在安装前显示计划并要求确认。测速时通过 wrapper 禁止 core 静默安装依赖；若检查到缺失，会提示先运行 `setup` 准备依赖。
-
-从不可变提交下载入口脚本（该提交版本为 `9b7ea69255cd81df22d27d851a250f6bdffec40c`）：
+1. 下载入口脚本并校验（只需一次）：
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/hytuytujyt/tcpquality-gd-compare/main/run.sh -o /root/tq-gd.sh
+   chmod 700 /root/tq-gd.sh
+   sha256sum /root/tq-gd.sh   # 与维护者在可信渠道公布的值比对，不一致不要运行
+   ```
+2. `setup`（可选，提前安装依赖）。
+3. `rtt <IP>`（可选，建议在不同时段多测几次，记下中位数）。
+4. `baseline [MiB]`：调优前测试。首次运行会提示安装依赖。
+5. `tune <Mbps> [RTT]`：基础调优。
+6. `after`：调优后测试。
+7. `compare`：查看前后对比。
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hytuytujyt/tcpquality-gd-compare/9b7ea69255cd81df22d27d851a250f6bdffec40c/run.sh -o /root/tq-gd.sh
-chmod 700 /root/tq-gd.sh
-```
-
-下载的 `run.sh` 本身仍需由用户从可信渠道确认；README 给出的链接固定到 commit，但没有提供入口脚本的独立 checksum。
-
-```sh
-# 只自动安装/检查，不开始测试（可选）
-/root/tq-gd.sh setup
-
-# 自动准备依赖；交互设置基线+调优后两轮的下载总预算，默认128MiB
-/root/tq-gd.sh baseline
-# 也可指定两轮总量：512MiB总预算，四次下载各最多128MiB
-# /root/tq-gd.sh baseline 512
-
-# 只做 tcpfit 基础调优；200 替换成套餐已知带宽 Mbps
-# 可选传入测得的 RTT（毫秒）；省略时取基线中广东电信/移动普通回程较大延迟，无有效数据则回退 150 ms
-/root/tq-gd.sh tune 200 35
-
-# 调优后复测并比较
+/root/tq-gd.sh rtt 你的公网IP
+/root/tq-gd.sh baseline 512
+/root/tq-gd.sh tune 200 60
 /root/tq-gd.sh after
 /root/tq-gd.sh compare
 ```
 
-`baseline` 会询问调优前+调优后两轮的单线程下载载荷总预算，默认 128 MiB，须为 4 的倍数；也可用 `baseline 512` 或 `TQ_SPEEDTEST_BUDGET_MIB=512 /root/tq-gd.sh baseline` 设置。`after` 自动沿用该预算。预算四等分给四次下载：128 MiB 意味每次最多 32 MiB；512 MiB 意味每次最多 128 MiB。它不是全机网络流量硬上限。
+## 参数说明
 
-`tune 200` 等价于 `tcpfit tune --role proxy --bw 200 --rtt 150`；也可用 `tune 200 35` 指定实测 RTT（毫秒，范围 1–2000）。不传 RTT 时，脚本取基线 CSV 中广东电信/移动普通回程延迟的较大值（向上取整，限制在 1–2000 ms），基线中没有有效延迟数据时回退到 150 ms；这是回程探测延迟，不是实测的端到端 RTT，建议按目标线路测量后显式传入。命令固定代理用途和已知带宽，只做基础调优，不执行 iperf 带宽探测、自动调优或拐点扫描。带宽必须是已知数值，不要写 `auto`。脚本采用一次性标记，防止误跑重复调优或重复测速。
+- **Mbps**：VPS 的出口带宽上限（套餐值），必须是整数，不能写 `auto`。
+- **RTT**（毫秒，1–2000）：优先使用 `rtt` 测得的中位数。省略时取 baseline 中电信/移动普通回程平均延迟的较大值（向上取整）；没有有效数据则用 150 ms。
+- **预算 MiB**：基线 + 调优后两轮合计，范围 32–2048，必须是 4 的倍数，默认 128。每次下载上限为预算的 1/4，每次下载有 10 秒超时。
+- **`rtt` 的环境变量**：`TQ_RTT_COUNT`（次数，默认 30，范围 1–999）、`TQ_RTT_PORT`（端口，默认 443）。
+- **其他环境变量**：`TCPQUALITY_GD_DATA_DIR`（数据目录，默认 `/root/tcpquality-gd-compare`，须为绝对路径）、`AUTO_INSTALL=1`（非交互模式下允许安装）、`FORCE_TCPFIT=1`（强制使用校验不符的已有 tcpfit）、`TQ_SPEEDTEST_BUDGET_MIB`（预算的另一种设置方式）。
 
-## 依赖安装与测试流程
+## 注意事项
 
-系统工具只在准备阶段检查和安装。`baseline`、`after` 运行时缺少 core 依赖会停止并提示先运行 `setup`，不会在测速期间静默安装；独立直接运行 core 时仍按 core 自身行为检查依赖。
+**流量**
+- 每完整对比一次（baseline + after）约消耗一个预算。重复 N 次即 N 倍。
+- 依赖安装、节点列表、路由探测等流量不在预算内。
+- 计数是网卡 RX+TX，包含其他流量，结果偏大，不等于供应商账单。脚本没有累计上限，需要自行记录。
 
-入口 `run.sh` 固定从新仓库的不可变提交下载 core，并在使用前校验其 SHA256。
+**RTT**
+- `rtt` 使用 TCP SYN 而不是 ICMP。如果目标端口丢弃 SYN，会显示全部丢包，换一个端口即可。
+- 延迟受时段影响，建议在晚高峰测量。
 
-## 外联、系统规则与结果解释
+**tune**
+- 会修改系统 TCP 参数，只能执行一次。失败时会自动回滚。
+- 想换 RTT 重做：`tcpfit rollback` → `RESET=YES /root/tq-gd.sh reset` → 重新 `baseline` → `tune`。`reset` 本身不会回滚 tcpfit。
 
-“不上传测试报告或参与测速排名”仅指报告/排名上传已关闭，不表示完全没有外联。运行时会从 `tcpquality.ibsgss.uk` 请求广东节点列表及测速候选；会向公网 IP 查询服务（如 ipify、icanhazip、ifconfig.me）查询出口地址，并把路由跳点 IP 交给 `whois.cymru.com` 查询 ASN。NextTrace、core、tcpfit 和系统依赖也会从各自发布源/包仓库下载。若需要零外联环境，此工具不适用。
+**结果校验**
+- `baseline`/`after` 的 CSV 必须同时包含广东电信和移动的有效单线程结果，否则不保存，可直接重试。
+- `compare` 时如果两次测试相隔超过 6 小时，会给出提醒，结论需谨慎。
 
-系统已有 iptables/ip6tables 时，core 会为单次测速临时创建 `TCPQ_TOS_*` 计数链，以统计目标连接流量；正常结束会删除规则和链。wrapper 会在每次测速开始前和退出时（含 Ctrl-C、TERM、HUP 中断）按 `TCPQ_TOS_` 前缀扫描并清理残留的计数链，且 wrapper 的 iptables 调用带 `-w 5` 等待 xtables 锁。强制 SIGKILL 或断电无法执行退出清理，但残留的链会在下一次运行测速前被清掉；也可手动用 `iptables -S | grep TCPQ_TOS` 检查 IPv4 规则（IPv6 可检查 `ip6tables -S`）。这是计数用途，不是用于放行或阻断流量的规则。
+**外联**
+- 会访问 `tcpquality.ibsgss.uk`、公网 IP 查询服务、`whois.cymru.com`，并从 NextTrace、tcpfit 的发布源和系统包仓库下载文件。不适用于零外联环境。
 
-单次前后对比受时段、节点负载和链路波动影响。需要较可靠的结论时，建议在相近时段重复多轮，比较中位数，并记录节点/RTT；不要把一次小流量下载结果视为稳定带宽承诺。
+**iptables**
+- 测速期间会临时创建 `TCPQ_TOS_*` 计数链，结束后删除。异常中断留下的残留链，下次运行时会自动清理。
 
-## 流量预算与数据保存
+**环境要求**：Linux VPS，root 权限，Bash，网络可用。
 
-用户设置的总预算分配到四个下载对象（两个运营商 × 两轮），每次最多为总预算的四分之一；另有少量回程探测、脚本/节点列表下载、协议开销及可能重传。安装系统依赖和 NextTrace/Tcpfit 工具的流量单独记录。脚本最后会列出准备工具、调优前测试、tcpfit 基础调优、调优后测试各阶段的网卡 RX+TX 增量及合计。计数包含并发流量，不是全机流量硬封顶，也不保证等于供应商账单。
-
-`baseline`/`after` 落盘前，wrapper 会检查 CSV 中是否同时有广东电信和移动状态为 OK 且下载速度为数值的单线程结果；缺失时不保存为正式记录，也不会锁死基线，可直接重试。`compare` 前会校验两份 CSV 的表头列名，不符合预期的 core 输出格式时拒绝对比；两次测试相隔超过 6 小时会给出提醒。下载 NextTrace 和 tcpfit 的临时文件放在数据目录下（而非 `/tmp`），避免 noexec 挂载导致的误导性报错；已存在的 `tcpfit` 与固定版本校验和不一致时会警告，但不会覆盖。
-
-结果默认保存在 `/root/tcpquality-gd-compare/`，包括预算设置、基线/调优后 CSV、完整日志、时间戳、分阶段流量计数及 `tune.done` 标记。每次运行的 CSV 使用独立临时文件名，完成后才替换对应阶段结果。可以设置 `TCPQUALITY_GD_DATA_DIR` 更换目录（绝对路径且不能经过符号链接）。
-
-如需重开一组：先备份结果；如要恢复系统到首次调优前，先运行 `tcpfit rollback`，再执行：
-
-```sh
-RESET=YES /root/tq-gd.sh reset
-```
-
-reset 仅删除工具管理的比较记录和数据目录中的 core，保留目录及其他文件，不会卸载系统依赖/tcpfit，也不会回滚系统 TCP 配置。为避免误删，`TCPQUALITY_GD_DATA_DIR` 必须是绝对路径；脚本拒绝根目录、常见系统目录、用户主目录及路径中的符号链接。
+**数据文件**：默认保存在 `/root/tcpquality-gd-compare/`，包括 `baseline.csv`、`after.csv`、日志、时间戳、流量计数、`rtt.csv`、`tune.done`。
