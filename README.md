@@ -36,7 +36,10 @@
 
 ```sh
 /root/tq-gd.sh setup
-/root/tq-gd.sh rtt 你的公网IP
+/root/tq-gd.sh rtt 你的公网IP   # 第 1 次
+/root/tq-gd.sh rtt 你的公网IP   # 第 2 次（可以隔一段时间再跑）
+/root/tq-gd.sh rtt 你的公网IP   # 第 3 次
+# 看 rtt.csv 的中位数，确定 tune 要填的 RTT
 /root/tq-gd.sh baseline 512
 /root/tq-gd.sh tune 200 60
 /root/tq-gd.sh after
